@@ -1,6 +1,7 @@
 package com.ansub.tvhome;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.Dialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -13,6 +14,7 @@ import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.ColorDrawable;
@@ -29,6 +31,8 @@ import android.net.NetworkRequest;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -73,6 +77,8 @@ public class MainActivity extends Activity {
     private static final String PLAY_STORE = "com.android.vending";
     private static final String SETTINGS = "settings";
     private static final String ADD = "add";
+    private static final String INPUTS = "inputs";
+    private static final String PICTURE = "picture";
     private static final String[] EDIT_ITEMS = {"Move", "Replace", "Remove from home", "Uninstall"};
     private static final String[] EDIT_ITEMS_SYSTEM = {"Move", "Replace", "Remove from home", "App info"};
     private static final int PER_ROW = 6, MAX_INPUTS = 4;
@@ -95,29 +101,13 @@ public class MainActivity extends Activity {
 
     // The Settings tile opens a small menu: the home screen's own settings, then the TV's.
     private static final String[] SETTINGS_ITEMS = {"Wallpaper", "TV settings"};
-    // Wallpapers, saved by name: a gradient top to bottom, then a glow from the top left and one from
-    // the bottom right. Dark ones first, then bright ones that get darker towards the bottom, so the
-    // white labels stay easy to read. Only colours, no images, so every one costs the same as Dusk,
-    // the default.
-    private static final String[] WALLPAPER_NAMES = {"Dusk", "Midnight", "Plum", "Forest", "Graphite", "Ocean", "Ember",
-            "Sunset", "Lagoon", "Aurora", "Coral", "Iris", "Meadow", "Gold"};
-    private static final int[][] WALLPAPERS = {
-        {0xFF15100F, 0xFF0A0809, 0xFF050405, 0x36FF8048, 0x2EAA3C8C},
-        {0xFF0E1220, 0xFF080A13, 0xFF040509, 0x384A6CFF, 0x2E5A3CC8},
-        {0xFF170E19, 0xFF0C070D, 0xFF050306, 0x38C050B4, 0x2E6440D2},
-        {0xFF0C150F, 0xFF070C09, 0xFF030604, 0x3050B478, 0x28289682},
-        {0xFF151617, 0xFF0B0C0D, 0xFF050506, 0x1CFFFFFF, 0x16A0B4C8},
-        {0xFF0A1517, 0xFF060C0E, 0xFF030607, 0x3426B4C8, 0x2E2A64C0},
-        {0xFF190D08, 0xFF0D0605, 0xFF060303, 0x40FF5A24, 0x32C8283C},
-        {0xFF8C3A5E, 0xFF5E2348, 0xFF22101E, 0xA0FF8A4C, 0x80E0457A},
-        {0xFF14588E, 0xFF15366E, 0xFF0A1632, 0x9030C8E0, 0x807A4CE0},
-        {0xFF0F4048, 0xFF0F2E3A, 0xFF08141C, 0x9038E0A0, 0x90A050F0},
-        {0xFFC0604E, 0xFF8A3456, 0xFF2E1230, 0x90FFB070, 0x70E04090},
-        {0xFF5A3CAE, 0xFF3A2A84, 0xFF16123A, 0x90C080FF, 0x804A7CFF},
-        {0xFF2E6E4C, 0xFF1C4A40, 0xFF0A201E, 0x90A8E070, 0x6030A8A8},
-        {0xFFB07624, 0xFF86401E, 0xFF2A1410, 0x90FFD060, 0x70FF5040},
-    };
     private float scale = 1f;
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private int shownWallpaper = -1;
+    private android.graphics.Bitmap grain;
+    private TextView memText;
+    private Picture picture;
+    private boolean pictureChecked;
 
     private static Typeface regular, semibold;
 
@@ -141,6 +131,19 @@ public class MainActivity extends Activity {
         @Override public void onReceive(Context c, Intent i) {
             dirty = true;
             refreshApps();
+        }
+    };
+
+    private final BroadcastReceiver clockChanged = new BroadcastReceiver() {
+        @Override public void onReceive(Context c, Intent i) {
+            showWallpaper(wallpaper());
+        }
+    };
+
+    private final Runnable memTick = new Runnable() {
+        @Override public void run() {
+            refreshMemory();
+            ui.postDelayed(this, 15000);
         }
     };
 
@@ -193,6 +196,11 @@ public class MainActivity extends Activity {
         moveHint.setText(Strings.t("Use the arrows to move it, then press OK"));
         moveHint.setVisibility(View.GONE);
         root.addView(moveHint, at(px(MARGIN), px(ROW1_TOP - 64), -2, -2));
+
+        memText = text(px(24), 0x8CFFFFFF, regular);
+        memText.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        memText.setSingleLine(true);
+        root.addView(memText, at(0, px(ICON_TOP), px(360), px(ICON_BUTTON)));
 
         setContentView(scroller);
 
@@ -284,8 +292,24 @@ public class MainActivity extends Activity {
             buildTiles();
         }
         refreshNetwork();
+        refreshPictureLabel();
+        showWallpaper(wallpaper());
+        ui.removeCallbacks(memTick);
+        memTick.run();
+        IntentFilter f2 = new IntentFilter(Intent.ACTION_TIME_TICK);
+        f2.addAction(Intent.ACTION_TIME_CHANGED);
+        f2.addAction(Intent.ACTION_TIMEZONE_CHANGED);
+        if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(clockChanged, f2, Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(clockChanged, f2);
         View f = getCurrentFocus();
         if (f == null && !tiles.isEmpty()) tiles.get(0).requestFocus();
+    }
+
+    @Override
+    protected void onPause() {
+        ui.removeCallbacks(memTick);
+        try { unregisterReceiver(clockChanged); } catch (IllegalArgumentException ignored) {}
+        super.onPause();
     }
 
     // Back from a menu or a window on top (like the uninstall prompt): catch up on apps that changed.
@@ -314,60 +338,36 @@ public class MainActivity extends Activity {
     @Override
     public void onBackPressed() { /* home screen: nothing to go back to */ }
 
-    // Static gradient, drawn once by the window: no extra view, no animation.
-    private Drawable background(int[] c) {
-        GradientDrawable base = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[] {c[0], c[1], c[2]});
-        GradientDrawable top = radial(c[3], 0.08f, -0.12f, px(1250));
-        GradientDrawable bottom = radial(c[4], 1.0f, 1.1f, px(1000));
-        for (GradientDrawable g : new GradientDrawable[] {base, top, bottom}) g.setDither(true);
-        return new LayerDrawable(new Drawable[] {base, top, bottom});
-    }
-
-    // The saved wallpaper, as an index into WALLPAPERS (Dusk if none is saved).
     private int wallpaper() {
         String saved = getSharedPreferences(PREFS, 0).getString("wallpaper", null);
-        return Math.max(0, Arrays.asList(WALLPAPER_NAMES).indexOf(saved));
+        return Math.max(0, Arrays.asList(Wallpapers.NAMES).indexOf(saved));
     }
 
+    // Rendered once at half size and scaled up; the grain on top is full size, so the gradients don't band.
     private void showWallpaper(int i) {
-        getWindow().setBackgroundDrawable(background(WALLPAPERS[i]));
+        int resolved = Wallpapers.resolve(i);
+        if (resolved == shownWallpaper) return;
+        shownWallpaper = resolved;
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        BitmapDrawable wall = new BitmapDrawable(getResources(),
+                Wallpapers.render(resolved, dm.widthPixels / 2, dm.heightPixels / 2, true));
+        wall.setFilterBitmap(true);
+        if (grain == null) grain = Wallpapers.grain();
+        BitmapDrawable noise = new BitmapDrawable(getResources(), grain);
+        noise.setTileModeXY(Shader.TileMode.REPEAT, Shader.TileMode.REPEAT);
+        getWindow().setBackgroundDrawable(new LayerDrawable(new Drawable[] {wall, noise}));
     }
 
-    // The wallpapers, each with a small dot of its colours. Moving through the list shows each one
-    // behind the panel; OK keeps it, Back goes back to the one before.
     private void showWallpapers() {
         final int size = px(40);
-        panel(Strings.t("Wallpaper"), Arrays.asList(WALLPAPER_NAMES), pos -> {
-            int[] c = WALLPAPERS[pos];
-            GradientDrawable dot = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                    new int[] {glow(c[3], c[0]), c[1], glow(c[4], c[0])});
-            dot.setShape(GradientDrawable.OVAL);
-            dot.setStroke(Math.max(1, px(2)), 0x26FFFFFF);
-            dot.setSize(size, size);
-            return dot;
-        }, size, wallpaper(), this::showWallpaper, which -> {
-            getSharedPreferences(PREFS, 0).edit().putString("wallpaper", WALLPAPER_NAMES[which]).apply();
+        List<String> labels = new ArrayList<>();
+        for (String name : Wallpapers.NAMES) labels.add(Strings.t(name));
+        labels.set(0, String.format(Strings.t("Automatic (now %s)"), Strings.t(Wallpapers.NAMES[Wallpapers.resolve(0)])));
+        panel(Strings.t("Wallpaper"), labels, pos -> new BitmapDrawable(getResources(), Wallpapers.dot(pos, size)),
+                size, wallpaper(), this::showWallpaper, which -> {
+            getSharedPreferences(PREFS, 0).edit().putString("wallpaper", Wallpapers.NAMES[which]).apply();
             showWallpaper(which);
         });
-    }
-
-    // A glow colour made solid over the base, three times as strong, so a small dot shows it.
-    private static int glow(int glow, int base) {
-        float a = Math.min(1f, 3 * (glow >>> 24) / 255f);
-        int r = Math.round(Color.red(base) + (Color.red(glow) - Color.red(base)) * a);
-        int g = Math.round(Color.green(base) + (Color.green(glow) - Color.green(base)) * a);
-        int b = Math.round(Color.blue(base) + (Color.blue(glow) - Color.blue(base)) * a);
-        return Color.rgb(r, g, b);
-    }
-
-    private static GradientDrawable radial(int color, float cx, float cy, float r) {
-        GradientDrawable g = new GradientDrawable();
-        g.setGradientType(GradientDrawable.RADIAL_GRADIENT);
-        g.setColors(new int[] {color, color & 0x00FFFFFF});
-        g.setGradientCenter(cx, cy);
-        g.setGradientRadius(r);
-        return g;
     }
 
     private void buildTiles() {
@@ -421,26 +421,47 @@ public class MainActivity extends Activity {
             addTile(root, pkg, label, banner, null, icon, gridX(i), gridY(i), w, h);
         }
 
-        // Bottom row: Play Store, HDMI inputs, Settings and Add app, six at most.
+        // Bottom row: Play Store, Picture, Settings and Add app. HDMI inputs live behind an icon at the top.
         int col = 0;
         boolean store = !apps.contains(PLAY_STORE) && launchIntent(pm, PLAY_STORE) != null;
-        List<TvInputInfo> inputs = hdmiInputs();
-        int room = PER_ROW - 2 - (store ? 1 : 0);
-        if (inputs.size() > room) inputs = inputs.subList(0, room);
         if (store)
             addTile(root, PLAY_STORE, "Play Store", null, LineIcon.PLAY, null, m + col++ * (w + g), bottomTop, w, h);
-        for (TvInputInfo in : inputs)
-            addTile(root, in.getId(), inputLabel(in), null, LineIcon.HDMI, null, m + col++ * (w + g), bottomTop, w, h);
+        if (!pictureChecked) {
+            picture = Picture.load(this);
+            pictureChecked = true;
+        }
+        if (picture != null) {
+            addTile(root, PICTURE, Strings.t("Picture"), null, LineIcon.PICTURE, null, m + col++ * (w + g), bottomTop, w, h);
+            ViewGroup inner = (ViewGroup) ((ViewGroup) tile(PICTURE)).getChildAt(0);
+            TextView mode = text(px(20), 0x99FFFFFF, regular);
+            mode.setSingleLine(true);
+            mode.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            mode.setGravity(Gravity.CENTER);
+            mode.setPadding(px(16), 0, px(16), 0);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+            lp.topMargin = px(2);
+            inner.addView(mode, lp);
+            refreshPictureLabel();
+        }
         addTile(root, SETTINGS, Strings.t("Settings"), null, LineIcon.SETTINGS, null, m + col++ * (w + g), bottomTop, w, h);
         addTile(root, ADD, Strings.t("Add app"), null, LineIcon.PLUS, null, m + col * (w + g), bottomTop, w, h);
 
-        // Plain icons at the top right, level with the date: any settings shortcuts picked, then the
+        // Plain icons at the top right, level with the date: inputs, any settings shortcuts picked, then the
         // network icon. Added last, so the first app keeps first focus; Up from the apps reaches them.
         List<Integer> quick = quickList();
+        boolean inputs = !hdmiInputs().isEmpty();
+        int icons = quick.size() + 1 + (inputs ? 1 : 0);
         int ib = px(ICON_BUTTON), ig = px(ICON_GAP);
         // The last icon's right edge lines up with the apps' (its focus circle sticks out past them).
         int qx = getResources().getDisplayMetrics().widthPixels - m + (ib - px(ICON_SIZE)) / 2
-                - (quick.size() + 1) * ib - quick.size() * ig;
+                - icons * ib - (icons - 1) * ig;
+        FrameLayout.LayoutParams mp = (FrameLayout.LayoutParams) memText.getLayoutParams();
+        mp.leftMargin = qx - ig - mp.width;
+        memText.setLayoutParams(mp);
+        if (inputs) {
+            addIcon(INPUTS, Strings.t("Inputs"), new LineIcon(LineIcon.HDMI), qx);
+            qx += ib + ig;
+        }
         for (int q : quick) {
             addIcon(QUICK + QUICK_NAMES[q], Strings.t(QUICK_LABELS[q]), new LineIcon(QUICK_ICONS[q]), qx);
             qx += ib + ig;
@@ -592,9 +613,14 @@ public class MainActivity extends Activity {
         } else if (SETTINGS.equals(key)) {
             dropdown(tile(SETTINGS), SETTINGS_ITEMS, which -> {
                 if (which == 0) showWallpapers();
-                else try { startActivity(new Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); }
-                catch (Exception ignored) {}
+                else openSettings();
             });
+            return;
+        } else if (INPUTS.equals(key)) {
+            showInputs();
+            return;
+        } else if (PICTURE.equals(key)) {
+            showPictureMenu();
             return;
         } else if (isInput(key)) {
             openInput(key);
@@ -749,6 +775,271 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void openSettings() {
+        try { startActivity(new Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); }
+        catch (Exception ignored) {}
+    }
+
+    private void refreshMemory() {
+        ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        if (am == null) return;
+        ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+        am.getMemoryInfo(mi);
+        memText.setText(String.format(Strings.t("RAM %d MB free"), mi.availMem / (1024 * 1024)));
+    }
+
+    // Each HDMI port, named after the device behind it when the TV knows it, faded when nothing is plugged in.
+    private void showInputs() {
+        final List<TvInputInfo> ports = hdmiInputs();
+        if (ports.isEmpty()) return;
+        TvInputManager tim = (TvInputManager) getSystemService(Context.TV_INPUT_SERVICE);
+        List<TvInputInfo> all = tim == null ? new ArrayList<>() : tim.getTvInputList();
+        String[] items = new String[ports.size()];
+        boolean[] dim = new boolean[ports.size()];
+        for (int i = 0; i < ports.size(); i++) {
+            TvInputInfo port = ports.get(i);
+            String device = null;
+            for (TvInputInfo in : all) {
+                if (!port.getId().equals(in.getParentId())) continue;
+                CharSequence l = in.loadLabel(this);
+                if (l != null && l.length() > 0) device = l.toString();
+            }
+            items[i] = device == null ? inputLabel(port) : inputLabel(port) + "  ·  " + device;
+            dim[i] = tim != null && tim.getInputState(port.getId()) == TvInputManager.INPUT_STATE_DISCONNECTED;
+        }
+        dropdown(tile(INPUTS), items, -1, dim, which -> openInput(ports.get(which).getId()));
+    }
+
+    private static final int NORMAL = -1, DARK = -2;
+
+    private boolean darkOn() {
+        return getSharedPreferences(PREFS, 0).getBoolean("dark_on", false)
+                && Picture.get(this, Picture.MODE, -1) == Picture.USER;
+    }
+
+    private int[] savedLevels(String prefix, int[] fallback) {
+        SharedPreferences prefs = getSharedPreferences(PREFS, 0);
+        int[] out = new int[Picture.LEVELS.length];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = prefs.getInt(prefix + Picture.LEVELS[i], -1);
+            if (out[i] < 0) return fallback;
+        }
+        return out;
+    }
+
+    private void saveLevels(String prefix, int[] v) {
+        SharedPreferences.Editor e = getSharedPreferences(PREFS, 0).edit();
+        for (int i = 0; i < v.length; i++) e.putInt(prefix + Picture.LEVELS[i], v[i]);
+        e.apply();
+    }
+
+    private String pictureLabel() {
+        if (picture == null) return "";
+        int mode = Picture.get(this, Picture.MODE, -1);
+        if (mode == Picture.USER) return Strings.t(darkOn() ? "Dark room" : "Normal");
+        String name = picture.nameOf(mode);
+        return name != null ? name : "";
+    }
+
+    private void refreshPictureLabel() {
+        View card = tile(PICTURE);
+        if (!(card instanceof ViewGroup) || ((ViewGroup) card).getChildCount() == 0) return;
+        View inner = ((ViewGroup) card).getChildAt(0);
+        if (inner instanceof ViewGroup && ((ViewGroup) inner).getChildCount() > 2
+                && ((ViewGroup) inner).getChildAt(2) instanceof TextView)
+            ((TextView) ((ViewGroup) inner).getChildAt(2)).setText(pictureLabel());
+    }
+
+    // Normal and Dark room are two sets of levels for the TV's User mode; the factory modes are only ever picked.
+    private void showPictureMenu() {
+        if (picture == null) return;
+        if (!Picture.canWrite(this)) {
+            panel(Strings.t("Picture modes need a one-time setup from the PC"),
+                    Collections.singletonList(Strings.t("TV settings")), which -> openSettings());
+            return;
+        }
+        final List<Integer> modes = new ArrayList<>();
+        List<String> labels = new ArrayList<>();
+        boolean custom = picture.hasUser();
+        if (custom) {
+            modes.add(NORMAL);
+            labels.add(Strings.t("Normal"));
+            modes.add(DARK);
+            labels.add(Strings.t("Dark room"));
+        }
+        for (int i = 0; i < picture.values.length; i++) {
+            if (custom && picture.values[i] == Picture.USER) continue;
+            modes.add(picture.values[i]);
+            labels.add(picture.names[i]);
+        }
+        final int adjust = custom ? labels.size() : -1;
+        if (custom) labels.add(Strings.t("Adjust dark room"));
+        labels.add(Strings.t("All picture settings"));
+        int mode = Picture.get(this, Picture.MODE, -1);
+        int checked = modes.indexOf(custom && mode == Picture.USER ? (darkOn() ? DARK : NORMAL) : mode);
+        dropdown(tile(PICTURE), labels.toArray(new String[0]), checked, null, which -> {
+            if (which < modes.size()) choosePicture(modes.get(which), null);
+            else if (which == adjust) adjustDarkRoom();
+            else openSettings();
+        });
+    }
+
+    // Leaving Dark room puts the Normal levels back first, so User in the TV's own menu always means Normal.
+    // The TV reloads a mode's levels a moment after a switch, hence the gap between steps.
+    private void choosePicture(int target, Runnable then) {
+        int mode = Picture.get(this, Picture.MODE, -1);
+        boolean wasDark = darkOn();
+        if (mode == Picture.USER && !wasDark) saveLevels("normal_", Picture.current(this));
+        final int[] normal = savedLevels("normal_", null);
+        List<Runnable> steps = new ArrayList<>();
+        if (target == DARK) {
+            if (mode != Picture.USER) steps.add(() -> Picture.put(this, Picture.MODE, Picture.USER));
+            steps.add(() -> writeLevels(savedLevels("dark_", Picture.DARK_DEFAULTS)));
+        } else {
+            if (wasDark && normal != null) steps.add(() -> writeLevels(normal));
+            if (target == NORMAL) {
+                if (mode != Picture.USER) steps.add(() -> Picture.put(this, Picture.MODE, Picture.USER));
+            } else {
+                steps.add(() -> Picture.put(this, Picture.MODE, target));
+            }
+        }
+        getSharedPreferences(PREFS, 0).edit().putBoolean("dark_on", target == DARK).apply();
+        steps.add(() -> {
+            refreshPictureLabel();
+            if (then != null) then.run();
+        });
+        runSteps(steps, 0);
+    }
+
+    private void runSteps(final List<Runnable> steps, final int i) {
+        if (i >= steps.size()) return;
+        steps.get(i).run();
+        ui.postDelayed(() -> runSteps(steps, i + 1), i + 1 < steps.size() ? 1500 : 0);
+    }
+
+    // One level at a time, then once more for any the TV dropped while it was busy with the one before.
+    private void writeLevels(final int[] v) {
+        for (int i = 0; i < v.length; i++) {
+            final int k = i;
+            ui.postDelayed(() -> Picture.put(this, Picture.LEVELS[k], v[k]), k * 250L);
+        }
+        ui.postDelayed(() -> {
+            for (int i = 0; i < v.length; i++)
+                if (Picture.get(this, Picture.LEVELS[i], -1) != v[i]) Picture.put(this, Picture.LEVELS[i], v[i]);
+        }, 1200);
+    }
+
+    private void adjustDarkRoom() {
+        if (darkOn()) showLevels();
+        else choosePicture(DARK, this::showLevels);
+    }
+
+    // Left and right change a level; the TV applies each step at once, and the panel leaves the picture undimmed.
+    private void showLevels() {
+        final Dialog d = new Dialog(this, android.R.style.Theme_Material_Dialog_NoActionBar);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(px(48), px(92), px(48), px(48));
+        TextView head = text(px(40), Color.WHITE, semibold);
+        head.setText(Strings.t("Dark room"));
+        box.addView(head);
+        TextView hint = text(px(24), 0x99FFFFFF, regular);
+        hint.setText(Strings.t("Left and right to change. The picture follows as you go."));
+        LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(-1, -2);
+        hp.topMargin = px(12);
+        hp.bottomMargin = px(28);
+        box.addView(hint, hp);
+        final TextView[] values = new TextView[Picture.LEVELS.length];
+        final View[] fills = new View[Picture.LEVELS.length];
+        for (int i = 0; i < Picture.LEVELS.length; i++) box.addView(levelRow(i, values, fills), new LinearLayout.LayoutParams(-1, -2));
+        final TextView reset = text(px(28), 0xD9FFFFFF, regular);
+        reset.setText(Strings.t("Back to the starting levels"));
+        reset.setGravity(Gravity.CENTER_VERTICAL);
+        reset.setMinHeight(px(88));
+        reset.setPadding(px(24), 0, px(24), 0);
+        final GradientDrawable rf = new GradientDrawable();
+        rf.setCornerRadius(px(RADIUS));
+        rf.setColor(Color.TRANSPARENT);
+        reset.setBackground(rf);
+        reset.setFocusable(true);
+        reset.setOnFocusChangeListener((v, has) -> rf.setColor(has ? 0x38FFFFFF : Color.TRANSPARENT));
+        reset.setOnClickListener(v -> {
+            saveLevels("dark_", Picture.DARK_DEFAULTS);
+            writeLevels(Picture.DARK_DEFAULTS);
+            for (int i = 0; i < Picture.LEVELS.length; i++) {
+                values[i].setText(String.valueOf(Picture.DARK_DEFAULTS[i]));
+                fills[i].setScaleX(Picture.DARK_DEFAULTS[i] / 100f);
+            }
+        });
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, -2);
+        rp.topMargin = px(24);
+        box.addView(reset, rp);
+        d.setContentView(box);
+        Window w = d.getWindow();
+        w.setBackgroundDrawable(new ColorDrawable(0xF2161113));
+        w.setLayout(px(640), -1);
+        w.setGravity(Gravity.END);
+        w.setDimAmount(0f);
+        d.setOnDismissListener(x -> refreshPictureLabel());
+        d.show();
+    }
+
+    private View levelRow(final int i, final TextView[] values, final View[] fills) {
+        final String key = Picture.LEVELS[i];
+        final int[] value = {Math.max(0, Math.min(100, Picture.get(this, key, 50)))};
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(px(24), px(18), px(24), px(22));
+        final GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(px(RADIUS));
+        bg.setColor(Color.TRANSPARENT);
+        row.setBackground(bg);
+        row.setFocusable(true);
+        row.setOnFocusChangeListener((v, has) -> bg.setColor(has ? 0x38FFFFFF : Color.TRANSPARENT));
+
+        LinearLayout top = new LinearLayout(this);
+        TextView name = text(px(28), 0xE6FFFFFF, regular);
+        name.setText(Strings.t(Picture.LEVEL_NAMES[i]));
+        top.addView(name, new LinearLayout.LayoutParams(0, -2, 1f));
+        values[i] = text(px(28), Color.WHITE, semibold);
+        values[i].setText(String.valueOf(value[0]));
+        top.addView(values[i]);
+        row.addView(top);
+
+        FrameLayout bar = new FrameLayout(this);
+        GradientDrawable track = new GradientDrawable();
+        track.setCornerRadius(px(4));
+        track.setColor(0x26FFFFFF);
+        bar.setBackground(track);
+        fills[i] = new View(this);
+        GradientDrawable fill = new GradientDrawable();
+        fill.setCornerRadius(px(4));
+        fill.setColor(0xE6FFFFFF);
+        fills[i].setBackground(fill);
+        fills[i].setPivotX(0);
+        fills[i].setScaleX(value[0] / 100f);
+        bar.addView(fills[i], new FrameLayout.LayoutParams(-1, -1));
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-1, px(8));
+        bp.topMargin = px(14);
+        row.addView(bar, bp);
+
+        row.setOnKeyListener((v, code, ev) -> {
+            int step = code == KeyEvent.KEYCODE_DPAD_LEFT ? -Picture.LEVEL_STEPS[i]
+                    : code == KeyEvent.KEYCODE_DPAD_RIGHT ? Picture.LEVEL_STEPS[i] : 0;
+            if (step == 0) return false;
+            if (ev.getAction() != KeyEvent.ACTION_DOWN) return true;
+            value[0] = Math.max(0, Math.min(100, value[0] + step));
+            Picture.put(this, key, value[0]);
+            int[] dark = savedLevels("dark_", Picture.DARK_DEFAULTS).clone();
+            dark[i] = value[0];
+            saveLevels("dark_", dark);
+            values[i].setText(String.valueOf(value[0]));
+            fills[i].setScaleX(value[0] / 100f);
+            return true;
+        });
+        return row;
+    }
+
     interface Pick { void at(int which); }
     interface Icon { Drawable at(int which) throws Exception; }
 
@@ -836,6 +1127,11 @@ public class MainActivity extends Activity {
     // A small menu that drops down under a tile, in the same glass as the tiles. Opens above the
     // tile when there's no room below. Back closes it.
     private void dropdown(View anchor, String[] items, final Pick pick) {
+        dropdown(anchor, items, -1, null, pick);
+    }
+
+    // checked (or -1) gets a dot; dim rows are shown faded but can still be picked.
+    private void dropdown(View anchor, String[] items, int checked, boolean[] dim, final Pick pick) {
         final Dialog d = new Dialog(this, android.R.style.Theme_Material_Dialog_NoActionBar);
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -847,14 +1143,25 @@ public class MainActivity extends Activity {
         bg.setStroke(Math.max(1, px(2)), 0x17FFFFFF);
         box.setBackground(bg);
         float widest = 0; // some languages need more room than the tile is wide
+        int dotSize = px(12), dotGap = px(16);
         for (int i = 0; i < items.length; i++) {
             final int which = i;
-            final TextView t = text(px(26), 0xD9FFFFFF, regular);
+            final int rest = dim != null && i < dim.length && dim[i] ? 0x73FFFFFF : 0xD9FFFFFF;
+            final TextView t = text(px(26), rest, regular);
             t.setText(Strings.t(items[i]));
             t.setSingleLine(true);
             t.setGravity(Gravity.CENTER_VERTICAL);
             t.setPadding(px(22), 0, px(22), 0);
-            widest = Math.max(widest, t.getPaint().measureText(t.getText().toString()) + 2 * px(22) + 2 * pad);
+            if (checked >= 0) {
+                GradientDrawable dot = new GradientDrawable();
+                dot.setShape(GradientDrawable.OVAL);
+                dot.setColor(i == checked ? Color.WHITE : Color.TRANSPARENT);
+                dot.setBounds(0, 0, dotSize, dotSize);
+                t.setCompoundDrawablesRelative(dot, null, null, null);
+                t.setCompoundDrawablePadding(dotGap);
+            }
+            widest = Math.max(widest, t.getPaint().measureText(t.getText().toString()) + 2 * px(22) + 2 * pad
+                    + (checked >= 0 ? dotSize + dotGap : 0));
             final GradientDrawable focus = new GradientDrawable();
             focus.setCornerRadius(px(RADIUS - pad));
             focus.setColor(Color.TRANSPARENT);
@@ -862,7 +1169,7 @@ public class MainActivity extends Activity {
             t.setFocusable(true);
             t.setOnFocusChangeListener((v, has) -> {
                 focus.setColor(has ? 0x38FFFFFF : Color.TRANSPARENT);
-                t.setTextColor(has ? Color.WHITE : 0xD9FFFFFF);
+                t.setTextColor(has ? Color.WHITE : rest);
             });
             t.setOnClickListener(v -> {
                 d.dismiss();
@@ -885,8 +1192,8 @@ public class MainActivity extends Activity {
         win.clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
         win.setGravity(Gravity.TOP | Gravity.START);
         android.view.WindowManager.LayoutParams lp = win.getAttributes();
-        lp.x = at[0];
-        lp.y = y;
+        lp.x = Math.max(px(24), Math.min(at[0], getResources().getDisplayMetrics().widthPixels - w - px(24)));
+        lp.y = Math.max(px(24), y);
         lp.width = w;
         lp.height = h;
         win.setAttributes(lp);
