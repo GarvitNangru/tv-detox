@@ -140,6 +140,17 @@ public class MainActivity extends Activity {
         }
     };
 
+    // Going to standby from inside an app would wake up in that app; switching to Home first makes power-on land here.
+    private final BroadcastReceiver screenOff = new BroadcastReceiver() {
+        @Override public void onReceive(Context c, Intent i) {
+            if (hasWindowFocus()) return;
+            try {
+                startActivity(new Intent(MainActivity.this, MainActivity.class).setAction(Intent.ACTION_MAIN)
+                        .addCategory(Intent.CATEGORY_HOME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (Exception ignored) {}
+        }
+    };
+
     private final Runnable memTick = new Runnable() {
         @Override public void run() {
             refreshMemory();
@@ -211,6 +222,9 @@ public class MainActivity extends Activity {
         f.addDataScheme("package");
         if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(packagesChanged, f, Context.RECEIVER_EXPORTED);
         else registerReceiver(packagesChanged, f);
+        IntentFilter off = new IntentFilter(Intent.ACTION_SCREEN_OFF);
+        if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(screenOff, off, Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(screenOff, off);
 
         ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         if (cm != null) try {
@@ -222,6 +236,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         unregisterReceiver(packagesChanged);
+        unregisterReceiver(screenOff);
         ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         if (cm != null) try { cm.unregisterNetworkCallback(networkChanged); } catch (Exception ignored) {}
         super.onDestroy();
